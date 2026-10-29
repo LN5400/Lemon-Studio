@@ -457,7 +457,13 @@ pub fn split_by_channel(s: &mut State) {
         let mut clips = Vec::with_capacity(a.clips.len());
         for c in std::mem::take(&mut a.clips) {
             if c.source == ClipSource::Pattern(cur) {
-                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
+                // Local patch: struct-update from a captured value inside a closure trips an rustc 1.95 ICE
+                // (broken MIR in type_check). Same semantics, written as an explicit field assignment.
+                clips.extend((1..=k).map(|j| {
+                    let mut nc = c;
+                    nc.source = ClipSource::Pattern(cur + j);
+                    nc
+                }));
             }
             clips.push(c);
         }

@@ -1,0 +1,116 @@
+name: Windows Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # rustc 1.95.0 ICEs on a struct-update inside a closure in patterns.rs (broken MIR).
+      # Rewrite it as an equivalent field assignment. No-op if the line is gone.
+      - name: Patch patterns.rs
+        shell: pwsh
+        run: |
+          $p = "crates/os-app/src/patterns.rs"
+          $s = Get-Content $p -Raw
+          $old = 'clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));'
+          $new = @'
+          clips.extend((1..=k).map(|j| {
+                              let mut nc = c;
+                              nc.source = ClipSource::Pattern(cur + j);
+                              nc
+                          }));
+          '@
+          if ($s.Contains($old)) {
+            $s = $s.Replace($old, $new)
+            Set-Content $p $s -NoNewline
+            Write-Host "patched"
+          } else {
+            Write-Host "pattern not found, leaving source as is"
+          }
+
+      - name: Build
+        run: cargo build --release -p os-app --locked
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Make installer
+        shell: pwsh
+        run: |
+          @'
+          Unicode true
+          !include "MUI2.nsh"
+          !include "x64.nsh"
+
+          Name "Lemon Studio"
+          OutFile "LemonStudio-0.0.1-win64-setup.exe"
+          InstallDir "$PROGRAMFILES64\Lemon Studio"
+          RequestExecutionLevel admin
+          SetCompressor /SOLID lzma
+
+          !define MUI_ICON "crates\os-app\assets\lemonstudio.ico"
+          !define MUI_UNICON "crates\os-app\assets\lemonstudio.ico"
+          !insertmacro MUI_PAGE_WELCOME
+          !insertmacro MUI_PAGE_DIRECTORY
+          !insertmacro MUI_PAGE_INSTFILES
+          !define MUI_FINISHPAGE_RUN "$INSTDIR\lemonstudio.exe"
+          !define MUI_FINISHPAGE_RUN_TEXT "Launch Lemon Studio"
+          !insertmacro MUI_PAGE_FINISH
+          !insertmacro MUI_UNPAGE_CONFIRM
+          !insertmacro MUI_UNPAGE_INSTFILES
+          !insertmacro MUI_LANGUAGE "English"
+
+          Section "Install"
+            SetOutPath "$INSTDIR"
+            File "target\release\lemonstudio.exe"
+            WriteUninstaller "$INSTDIR\uninstall.exe"
+
+            CreateDirectory "$SMPROGRAMS\Lemon Studio"
+            CreateShortcut "$SMPROGRAMS\Lemon Studio\Lemon Studio.lnk" "$INSTDIR\lemonstudio.exe" "" "$INSTDIR\lemonstudio.exe" 0
+            CreateShortcut "$SMPROGRAMS\Lemon Studio\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+            CreateShortcut "$DESKTOP\Lemon Studio.lnk" "$INSTDIR\lemonstudio.exe" "" "$INSTDIR\lemonstudio.exe" 0
+
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "DisplayName" "Lemon Studio"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "DisplayVersion" "0.0.1"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "Publisher" "Lemon Studio (open source, GPL-3.0)"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "DisplayIcon" "$INSTDIR\lemonstudio.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "UninstallString" "$INSTDIR\uninstall.exe"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "URLInfoAbout" "https://github.com/ItsAlphaNeon/Lemon-Studio"
+            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "NoModify" 1
+            WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio" "NoRepair" 1
+          SectionEnd
+
+          Section "Uninstall"
+            Delete "$INSTDIR\lemonstudio.exe"
+            Delete "$INSTDIR\uninstall.exe"
+            RMDir "$INSTDIR"
+            Delete "$SMPROGRAMS\Lemon Studio\Lemon Studio.lnk"
+            Delete "$SMPROGRAMS\Lemon Studio\Uninstall.lnk"
+            RMDir "$SMPROGRAMS\Lemon Studio"
+            Delete "$DESKTOP\Lemon Studio.lnk"
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\LemonStudio"
+          SectionEnd
+          '@ | Set-Content -Encoding UTF8 installer.nsi
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          Get-FileHash LemonStudio-0.0.1-win64-setup.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  LemonStudio-0.0.1-win64-setup.exe" } | Set-Content SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lemonstudio-win64-installer
+          path: |
+            LemonStudio-0.0.1-win64-setup.exe
+            SHA256SUMS.txt
